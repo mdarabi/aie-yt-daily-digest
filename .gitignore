@@ -1,0 +1,15 @@
+# secrets
+.env
+
+# runtime data
+state/
+logs/
+preview.html
+preview.txt
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/

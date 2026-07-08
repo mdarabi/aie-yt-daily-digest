@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UCLKPca3kwwd-B59HNr-_lvA"/>
+ <id>yt:channel:LKPca3kwwd-B59HNr-_lvA</id>
+ <yt:channelId>LKPca3kwwd-B59HNr-_lvA</yt:channelId>
+ <title>AI Engineer</title>
+ <link rel="alternate" href="https://www.youtube.com/channel/UCLKPca3kwwd-B59HNr-_lvA"/>
+ <author>
+  <name>AI Engineer</name>
+  <uri>https://www.youtube.com/channel/UCLKPca3kwwd-B59HNr-_lvA</uri>
+ </author>
+ <published>2023-01-11T05:00:34+00:00</published>
+ <entry>
+  <id>yt:video:VIDEOID0001</id>
+  <yt:videoId>VIDEOID0001</yt:videoId>
+  <yt:channelId>UCLKPca3kwwd-B59HNr-_lvA</yt:channelId>
+  <title>Teaching Coding Agents to do Spreadsheets - Nuno Campos, Witan Labs</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=VIDEOID0001"/>
+  <author>
+   <name>AI Engineer</name>
+  </author>
+  <published>2026-07-08T09:03:25+00:00</published>
+  <updated>2026-07-08T11:52:22+00:00</updated>
+  <media:group>
+   <media:title>Teaching Coding Agents to do Spreadsheets - Nuno Campos, Witan Labs</media:title>
+   <media:description>Talk from AI Engineer.
+
+https://github.com/witanlabs/research-log</media:description>
+  </media:group>
+ </entry>
+ <entry>
+  <id>yt:video:VIDEOID0002</id>
+  <yt:videoId>VIDEOID0002</yt:videoId>
+  <yt:channelId>UCLKPca3kwwd-B59HNr-_lvA</yt:channelId>
+  <title>Your agent is blindfolded — Johan Lajili, Poolside AI</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=VIDEOID0002"/>
+  <author>
+   <name>AI Engineer</name>
+  </author>
+  <published>2026-07-08T13:45:06+00:00</published>
+  <updated>2026-07-08T13:50:00+00:00</updated>
+ </entry>
+ <entry>
+  <id>yt:video:VIDEOID0003</id>
+  <yt:videoId>VIDEOID0003</yt:videoId>
+  <yt:channelId>UCLKPca3kwwd-B59HNr-_lvA</yt:channelId>
+  <title>GTM Is You - Victoria Melnikova, Evil Martians</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=VIDEOID0003"/>
+  <author>
+   <name>AI Engineer</name>
+  </author>
+  <published>2026-07-07T23:32:05+00:00</published>
+  <updated>2026-07-07T23:40:00+00:00</updated>
+ </entry>
+</feed>

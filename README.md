@@ -75,6 +75,35 @@ launchctl bootout "gui/$(id -u)/com.mdarabi.aie-yt-daily-digest" # disable
 scripts/install_launchd.sh                                        # re-enable/update
 ```
 
+### Verifying the setup
+
+Note: the LaunchAgent does not appear in `crontab -l` — launchd and cron are
+separate schedulers, and this project uses one *or* the other.
+
+```sh
+# 1. Loaded? "state = not running" means loaded and waiting for 6:00 (healthy).
+#    "Could not find service" means it isn't installed — rerun the script.
+launchctl print "gui/$(id -u)/com.mdarabi.aie-yt-daily-digest" | grep -E "state|path"
+
+# 2. Schedule right? Confirm StartCalendarInterval (Hour/Minute) and the paths.
+plutil -p ~/Library/LaunchAgents/com.mdarabi.aie-yt-daily-digest.plist
+
+# 3. Definitive end-to-end test: make launchd run the job right now, exactly as
+#    it will at 6:00. CAUTION: this is a REAL run — if there are new videos it
+#    sends a real digest email (on a fresh machine: the last LOOKBACK_HOURS).
+#    "no videos ready" in the log + no email is also a successful test.
+launchctl kickstart "gui/$(id -u)/com.mdarabi.aie-yt-daily-digest"
+tail -f logs/cron.log                 # watch it run (Ctrl-C to stop)
+
+# 4. After any run: PID column is "-" when idle; second column is the last
+#    exit code (0 = success).
+launchctl list | grep mdarabi
+tail -5 logs/digest.log
+```
+
+The morning-after check is simply: the digest is in your inbox (or nothing
+arrived on a no-new-videos day) and `logs/digest.log` has a fresh timestamp.
+
 Prefer classic cron instead? `scripts/install_cron.sh` installs a crontab entry
 (`scripts/install_cron.sh "30 7 * * *"` for a custom schedule). The two installers
 remove each other's entry, so the digest never runs twice. Note: modifying crontab

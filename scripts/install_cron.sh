@@ -29,7 +29,10 @@ fi
 
 mkdir -p "$REPO/logs" "$REPO/state"
 
-LINE="$SCHEDULE cd $REPO && PATH=$CRON_PATH $UV_BIN run aie-digest >> $REPO/logs/cron.log 2>&1 $MARKER"
+# USER is set explicitly for the same reason as in the LaunchAgent: the claude
+# CLI reads its Keychain login under that account name, and not every cron
+# implementation exports it.
+LINE="$SCHEDULE cd $REPO && PATH=$CRON_PATH USER=$(id -un) $UV_BIN run aie-digest >> $REPO/logs/cron.log 2>&1 $MARKER"
 
 ( crontab -l 2>/dev/null | grep -vF "$MARKER" || true; echo "$LINE" ) | crontab -
 

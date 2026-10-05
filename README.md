@@ -171,6 +171,13 @@ Other runtime files (also gitignored): `logs/digest.log`, `logs/cron.log`,
 - **`claude -p` auth errors** — the CLI login can expire; run `claude` once
   interactively to re-authenticate. Cron uses the same stored login. (A stray
   `ANTHROPIC_API_KEY` is deliberately ignored so runs always bill the subscription.)
+- **"Not logged in · Please run /login" only on the schedule** — if `claude -p`
+  works by hand but every scheduled run fails this way, the scheduler isn't
+  passing `USER` through. The CLI reads its login from the macOS Keychain under
+  that account name, and a LaunchAgent inherits only the variables its plist
+  names. The digest sets `USER` itself (from the passwd database) so this can't
+  bite again; `scripts/install_launchd.sh` also writes it into the plist.
+  Re-run the installer if you have an older plist.
 - **yt-dlp errors after months of working** — YouTube changed something;
   upgrade with `uv lock --upgrade-package yt-dlp && uv sync`.
 - **Resend 403 about the from address** — the sending domain isn't verified (or the

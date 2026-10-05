@@ -1,12 +1,15 @@
 import json
+import os
+import pwd
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
 
 import digest.summarize as summarize
-from digest.summarize import (FALLBACK_THEME_TITLE, MORE_THEME_TITLE,
-                              SummarizeError, Theme, VideoSummary,
-                              _unwrap_cli_envelope, extract_json,
+from digest.summarize import (FALLBACK_THEME_TITLE, MORE_THEME_TITLE, AuthError,
+                              SummarizeError, Theme, VideoSummary, _failure_reason,
+                              _unwrap_cli_envelope, claude_env, extract_json,
                               group_into_themes, summarize_video)
 from digest.youtube import VideoRecord
 
@@ -71,6 +74,88 @@ def test_unwrap_cli_envelope_error():
 
 def test_unwrap_cli_envelope_non_json_passthrough():
     assert _unwrap_cli_envelope("plain text") == "plain text"
+
+
+def test_unwrap_cli_envelope_login_error_is_auth_error():
+    envelope = json.dumps({"type": "result", "is_error": True,
+                           "result": "Not logged in · Please run /login"})
+    with pytest.raises(AuthError):
+        _unwrap_cli_envelope(envelope)
+
+
+# --- claude subprocess environment ------------------------------------------------
+
+def test_claude_env_sets_user_even_when_absent(monkeypatch):
+    """A LaunchAgent passes only PATH and HOME; the CLI needs USER to find its
+    Keychain login, so the runner must supply it itself."""
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+
+    env = claude_env()
+    assert env["USER"] == pwd.getpwuid(os.getuid()).pw_name
+    assert env["LOGNAME"] == env["USER"]
+
+
+def test_claude_env_strips_api_key_and_claudecode(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-leak")
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+    env = claude_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDECODE" not in env
+
+
+# --- failure reporting ------------------------------------------------------------
+
+def _proc(stdout="", stderr="", returncode=1):
+    return subprocess.CompletedProcess(
+        args=["claude"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def test_failure_reason_reads_result_from_the_envelope():
+    """The CLI puts the reason near the front of a ~900-char envelope; tailing
+    the output drops it and leaves only zeroed token counters."""
+    envelope = json.dumps({
+        "is_error": True,
+        "result": "Not logged in · Please run /login",
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "terminal_reason": "api_error",
+        "uuid": "f76154c7-ac96-4106-8682-4d97f58d824d",
+    })
+    assert _failure_reason(_proc(stdout=envelope)) == "Not logged in · Please run /login"
+
+
+def test_failure_reason_falls_back_to_raw_text():
+    assert _failure_reason(_proc(stderr="command not found")) == "command not found"
+
+
+def test_failure_reason_handles_empty_output():
+    assert _failure_reason(_proc()) == "no output"
+
+
+def test_auth_failure_is_not_retried():
+    calls = {"n": 0}
+
+    def runner(prompt):
+        calls["n"] += 1
+        raise AuthError("claude CLI is not authenticated: Not logged in · Please run /login")
+
+    with pytest.raises(AuthError):
+        summarize_video(make_video(), runner)
+    assert calls["n"] == 1, "a broken login must not burn a second attempt and a backoff"
+
+
+def test_usage_limit_still_retries():
+    calls = {"n": 0}
+
+    def runner(prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SummarizeError("claude -p exited 1: 5-hour limit reached")
+        return GOOD_SUMMARY
+
+    assert summarize_video(make_video(), runner).problem
+    assert calls["n"] == 2
 
 
 # --- summarize_video --------------------------------------------------------------

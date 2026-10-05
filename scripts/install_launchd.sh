@@ -29,6 +29,12 @@ if [[ -n "$CLAUDE_BIN" ]]; then
   AGENT_PATH="$(dirname "$CLAUDE_BIN"):$AGENT_PATH"
 fi
 
+# A LaunchAgent inherits nothing but the variables named below. USER has to be
+# among them: the claude CLI finds its stored login in the macOS Keychain under
+# that account name, and without it every `claude -p` call exits 1 with
+# "Not logged in · Please run /login" even though the login is perfectly valid.
+AGENT_USER="$(id -un)"
+
 mkdir -p "$REPO/logs" "$REPO/state" "$HOME/Library/LaunchAgents"
 
 cat > "$PLIST" <<EOF
@@ -52,6 +58,10 @@ cat > "$PLIST" <<EOF
         <string>$AGENT_PATH</string>
         <key>HOME</key>
         <string>$HOME</string>
+        <key>USER</key>
+        <string>$AGENT_USER</string>
+        <key>LOGNAME</key>
+        <string>$AGENT_USER</string>
     </dict>
     <key>StartCalendarInterval</key>
     <dict>

@@ -21,7 +21,7 @@ from .config import Config
 from .emailer import send_email
 from .render import DigestItem, render_email, render_empty_email, render_error_email
 from .state import State
-from .summarize import (SummarizeError, Theme, group_into_themes,
+from .summarize import (AuthError, SummarizeError, Theme, group_into_themes,
                         make_claude_runner, summarize_video)
 from .youtube import DEFER_LIVE_STATUSES, FeedEntry, VideoRecord, YouTubeError
 
@@ -198,6 +198,13 @@ def build_digest(cfg: Config, records: list[VideoRecord]) -> tuple[list[Theme], 
         try:
             summary = summarize_video(rec, runner, cfg.transcript_char_limit)
             summarized.append((rec, summary))
+        except AuthError:
+            # Not a per-video problem. Every remaining video would spend two
+            # attempts and a backoff arriving at the same answer, so stop here
+            # and leave the whole batch unseen for the next run.
+            log.error("aborting at video %d/%d — the claude CLI login is unusable",
+                      i, len(records))
+            raise
         except SummarizeError as exc:
             log.error("summarization failed for %s: %s", rec.video_id, exc)
             summary = None

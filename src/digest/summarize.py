@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pwd
 import shutil
 import subprocess
 import time
@@ -28,6 +29,10 @@ Runner = Callable[[str], str]
 
 class SummarizeError(Exception):
     pass
+
+
+class AuthError(SummarizeError):
+    """The claude CLI has no usable login — retrying cannot help."""
 
 
 @dataclass
@@ -70,25 +75,91 @@ def find_claude_bin(configured: str = "") -> str:
     )
 
 
+def claude_env() -> dict[str, str]:
+    """The environment for `claude -p`, hardened for headless schedulers.
+
+    Two variables are removed: ANTHROPIC_API_KEY (a stray key would silently
+    switch billing from the user's subscription to per-token API usage) and
+    CLAUDECODE (so a nested run inside a Claude Code session behaves like a
+    normal standalone invocation).
+
+    USER is *added* because the CLI looks its stored login up in the macOS
+    Keychain under that account name. A LaunchAgent gets only the variables
+    named in its plist, so under the 6:00 schedule USER is unset and every
+    call fails with "Not logged in · Please run /login" — while the very same
+    command works by hand. The name comes from the passwd database rather
+    than os.environ so it is correct however the process was started.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
+    try:
+        username = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:  # uid with no passwd entry — fall back to whatever we got
+        username = env.get("USER") or env.get("LOGNAME") or ""
+    if username:
+        env["USER"] = username
+        env.setdefault("LOGNAME", username)
+    return env
+
+
+# Substrings marking a login failure that a retry cannot fix. Every variant the
+# CLI emits ends in "Please run /login"; usage-limit messages match none of
+# these and keep their normal retry path.
+_AUTH_MARKERS = ("not logged in", "/login", "invalid api key",
+                 "authentication_error", "oauth token has expired")
+
+_AUTH_HINT = (
+    "claude CLI is not authenticated: {reason}. Run `claude` once interactively "
+    "to log in. If it only fails on the schedule, the scheduler is not passing "
+    "USER through and the CLI cannot find its Keychain login."
+)
+
+
+def _raise_for_failure(reason: str, returncode: int | None = None) -> None:
+    if any(marker in reason.lower() for marker in _AUTH_MARKERS):
+        raise AuthError(_AUTH_HINT.format(reason=reason))
+    if returncode is None:
+        raise SummarizeError(f"claude -p returned an error: {reason}")
+    raise SummarizeError(f"claude -p exited {returncode}: {reason}")
+
+
+def _failure_reason(proc: subprocess.CompletedProcess) -> str:
+    """Pull the human-readable reason out of a failed `claude -p` call.
+
+    With --output-format json the CLI still prints a result envelope when it
+    fails, and puts the actual reason in "result" — near the *front* of a
+    ~900-char line. Tailing the raw output drops precisely that field and
+    leaves nothing but token counters, so parse the envelope first.
+    """
+    for stream in (proc.stdout, proc.stderr):
+        text = (stream or "").strip()
+        if not text:
+            continue
+        try:
+            envelope = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(envelope, dict):
+            reason = envelope.get("result") or envelope.get("error")
+            if isinstance(reason, str) and reason.strip():
+                return reason.strip()
+    raw = (proc.stderr or proc.stdout or "").strip()
+    return raw[:500] if raw else "no output"
+
+
 def make_claude_runner(cfg: Config) -> Runner:
     claude_bin = find_claude_bin(cfg.claude_bin)
     log.debug("using claude binary: %s", claude_bin)
+    env = claude_env()
 
     def run(prompt: str) -> str:
         cmd = [claude_bin, "-p", "--model", cfg.claude_model, "--output-format", "json"]
-        # Always bill the user's Claude subscription (the CLI's stored login):
-        # a stray ANTHROPIC_API_KEY in the environment would silently switch to
-        # per-token API billing. CLAUDECODE is stripped so a nested run inside a
-        # Claude Code session behaves like a normal standalone invocation.
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
         proc = subprocess.run(
             cmd, input=prompt, capture_output=True, text=True,
             timeout=cfg.claude_timeout, env=env,
         )
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip()[-500:]
-            raise SummarizeError(f"claude -p exited {proc.returncode}: {tail}")
+            _raise_for_failure(_failure_reason(proc), proc.returncode)
         return _unwrap_cli_envelope(proc.stdout)
 
     return run
@@ -102,7 +173,7 @@ def _unwrap_cli_envelope(stdout: str) -> str:
         return stdout
     if isinstance(envelope, dict):
         if envelope.get("is_error"):
-            raise SummarizeError(f"claude -p returned an error: {envelope.get('result')}")
+            _raise_for_failure(str(envelope.get("result") or "no reason given"))
         result = envelope.get("result")
         if isinstance(result, str):
             return result
@@ -115,6 +186,8 @@ def _call_with_retry(runner: Runner, prompt: str, attempts: int = 2,
     for attempt in range(attempts):
         try:
             return runner(prompt)
+        except AuthError:
+            raise  # a broken login will still be broken 20 seconds from now
         except (SummarizeError, subprocess.TimeoutExpired) as exc:
             last = exc
             log.warning("claude call failed (attempt %d/%d): %s", attempt + 1, attempts, exc)

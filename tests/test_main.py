@@ -1,10 +1,16 @@
+import json
+from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
-from digest.main import (_deep_discover, compute_window_start,
-                         feed_is_saturated, select_feed_candidates)
+import pytest
+
+from digest.main import (Candidate, _deep_discover, compute_window_start,
+                         feed_is_saturated, run, select_feed_candidates)
 from digest.config import Config
 from digest.state import State
+from digest.summarize import AuthError
 from digest.youtube import FeedEntry, VideoRecord
 
 NOW = datetime(2026, 7, 8, 6, 0, 0, tzinfo=timezone.utc)
@@ -121,3 +127,45 @@ def test_deep_discover_backfill_skips_seen_and_stops_at_window(monkeypatch):
     found = _deep_discover(cfg, state, NOW - timedelta(days=14), set(), skip_seen=True)
     assert [c.video_id for c in found] == ["new1", "new2"]
     assert all(c.record is not None for c in found)
+
+
+# --- authentication failures -------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "batch_size, successful_summaries",
+    [(1, 0), (3, 1)],
+    ids=["single-video", "mid-batch"],
+)
+def test_run_auth_failure_aborts_batch_without_sending_or_saving_state(
+        tmp_path, monkeypatch, batch_size, successful_summaries):
+    cfg = Config(root=tmp_path)
+    records = [record(f"video{i}", hours_ago=i + 1) for i in range(batch_size)]
+    state = State(last_success=NOW - timedelta(days=1))
+    state.mark_seen("previously-sent", NOW - timedelta(days=1))
+    for rec in records:
+        state.defer(rec.video_id, rec.title, "captions pending", rec.published, NOW)
+    state.save(cfg.state_file)
+    original_state = cfg.state_file.read_bytes()
+
+    candidates = [Candidate(rec.video_id, rec.published, rec) for rec in records]
+    monkeypatch.setattr("digest.main.discover_candidates", Mock(return_value=candidates))
+    summary = json.dumps({
+        "problem": "A problem worth solving.",
+        "solution": "An approach to solving it.",
+        "topics": ["agents"],
+    })
+    runner = Mock(side_effect=[
+        *([summary] * successful_summaries),
+        AuthError("Not logged in · Please run /login"),
+    ])
+    monkeypatch.setattr("digest.main.make_claude_runner", Mock(return_value=runner))
+    send_email = Mock()
+    monkeypatch.setattr("digest.main.send_email", send_email)
+    args = Namespace(test_latest=None, dry_run=False, no_send=False, backfill_hours=None)
+
+    with pytest.raises(AuthError, match="Not logged in"):
+        run(cfg, args)
+
+    assert runner.call_count == successful_summaries + 1
+    send_email.assert_not_called()
+    assert cfg.state_file.read_bytes() == original_state

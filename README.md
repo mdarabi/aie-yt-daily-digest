@@ -39,7 +39,10 @@ Robustness properties:
 - **Caption lag** — brand-new videos without auto-captions yet are deferred by id
   and retried on later runs (up to 48h, then summarized from the description).
 - **Live streams / premieres** are deferred until they've finished and processed.
-- **Failures email you** (`ERROR_EMAILS=true`) and are logged to `logs/digest.log`.
+- **Failures email you** (`ERROR_EMAILS=true`) with the failing step, known cause,
+  recovery steps, affected video, and original service error. Related problems
+  from the same run (such as YouTube caption rate limits) are included separately.
+  Unknown errors are identified as unknown. Complete tracebacks stay in `logs/digest.log`.
 
 No YouTube Data API is used — discovery is the public RSS feed; metadata and
 captions come from `yt-dlp` (managed as a project dependency by uv).
@@ -169,7 +172,10 @@ Other runtime files (also gitignored): `logs/digest.log`, `logs/cron.log`,
 - **No email arrived** — check `logs/cron.log` and `logs/digest.log`. If
   `ERROR_EMAILS=true` and Resend itself works, failures also arrive by email.
 - **`claude -p` auth errors** — the CLI login can expire; run `claude` once
-  interactively to re-authenticate. Cron uses the same stored login. (A stray
+  interactively and use `/login` to re-authenticate on the Mac running the digest.
+  This includes "Failed to authenticate: OAuth session expired and could not be
+  refreshed". Verify with `uv run aie-digest --test-latest 1 --dry-run`.
+  Cron uses the same stored login. (A stray
   `ANTHROPIC_API_KEY` is deliberately ignored so runs always bill the subscription.)
 - **"Not logged in · Please run /login" only on the schedule** — if `claude -p`
   works by hand but every scheduled run fails this way, the scheduler isn't
@@ -180,6 +186,10 @@ Other runtime files (also gitignored): `logs/digest.log`, `logs/cron.log`,
   Re-run the installer if you have an older plist.
 - **yt-dlp errors after months of working** — YouTube changed something;
   upgrade with `uv lock --upgrade-package yt-dlp && uv sync`.
+- **YouTube HTTP 429 / Too Many Requests** — caption/video requests are being
+  rate-limited. Let the limit clear before retrying the backlog; open an affected
+  video in a browser on the same Mac and complete any CAPTCHA YouTube presents.
+  Re-authenticating Claude does not resolve this separate YouTube issue.
 - **Resend 403 about the from address** — the sending domain isn't verified (or the
   key belongs to another team). Verify your sending domain in the Resend dashboard.
 - **Duplicate or missing videos** — inspect `state/state.json`; deleting it makes

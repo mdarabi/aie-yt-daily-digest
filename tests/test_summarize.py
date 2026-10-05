@@ -3,10 +3,13 @@ import os
 import pwd
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 import digest.summarize as summarize
+from digest.config import Config
 from digest.summarize import (FALLBACK_THEME_TITLE, MORE_THEME_TITLE, AuthError,
                               SummarizeError, Theme, VideoSummary, _failure_reason,
                               _unwrap_cli_envelope, claude_env, extract_json,
@@ -143,6 +146,20 @@ def test_auth_failure_is_not_retried():
     with pytest.raises(AuthError):
         summarize_video(make_video(), runner)
     assert calls["n"] == 1, "a broken login must not burn a second attempt and a backoff"
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_real_oauth_expiry_message_is_recognized_without_retry(monkeypatch, returncode):
+    reason = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    proc = _proc(stdout=json.dumps({"is_error": True, "result": reason}), returncode=returncode)
+    subprocess_run = Mock(return_value=proc)
+    monkeypatch.setattr(summarize, "find_claude_bin", lambda configured: "claude")
+    monkeypatch.setattr(summarize.subprocess, "run", subprocess_run)
+    runner = summarize.make_claude_runner(Config(root=Path(".")))
+
+    with pytest.raises(AuthError, match="OAuth session expired"):
+        summarize_video(make_video(), runner)
+    assert subprocess_run.call_count == 1
 
 
 def test_usage_limit_still_retries():

@@ -11,8 +11,9 @@ import html
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .diagnostics import Diagnosis, FailureReport
 from .summarize import Theme, VideoSummary
-from .youtube import VideoRecord
+from .youtube import WATCH_URL, VideoRecord
 
 _FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
@@ -49,23 +50,72 @@ def render_empty_email(date: datetime) -> tuple[str, str, str]:
     return subject, html_body, body
 
 
-def render_error_email(date: datetime, error: str) -> tuple[str, str, str]:
-    subject = f"AI Engineer digest — {date:%a %b} {date.day} · run FAILED"
-    text = (
-        "The daily digest run failed.\n\n"
-        f"{error}\n\n"
-        "Check logs/digest.log on the Mac for details. "
-        "Unprocessed videos stay queued and will be included once a run succeeds."
-    )
-    html_body = (
-        f'<div style="font-family:{_FONT};font-size:15px;color:#333;">'
-        f"<p>The daily digest run failed.</p>"
-        f'<pre style="background:#f6f6f6;padding:12px;border-radius:6px;'
-        f'white-space:pre-wrap;">{html.escape(error)}</pre>'
-        f"<p>Check <code>logs/digest.log</code> on the Mac for details. "
-        f"Unprocessed videos stay queued and will be included once a run succeeds.</p></div>"
-    )
-    return subject, html_body, text
+def render_error_email(date: datetime, report: FailureReport) -> tuple[str, str, str]:
+    diagnosis = report.diagnosis
+    subject = f"AI Engineer digest — {date:%a %b} {date.day} · run FAILED: {diagnosis.title}"
+    lines = ["The daily digest run failed.", "", f"Cause: {diagnosis.title}",
+             diagnosis.cause, "", f"Failing step: {report.stage}"]
+    if report.video:
+        lines.append(f"Affected video: {report.video}")
+    lines.extend(["", "What you can do:"])
+    lines.extend(f"{i}. {action}" for i, action in enumerate(diagnosis.actions, 1))
+    lines.extend(["", f"Run impact: {report.impact}"])
+
+    parts = [
+        f'<div style="font-family:{_FONT};font-size:15px;line-height:1.55;'
+        'color:#24292f;max-width:680px;margin:0 auto;padding:8px 16px;">',
+        f'<h1 style="font-size:21px;color:#cf222e;">{html.escape(diagnosis.title)}</h1>',
+        f"<p>{html.escape(diagnosis.cause)}</p>",
+        f"<p><strong>Failing step:</strong> {html.escape(report.stage)}</p>",
+    ]
+    if report.video:
+        parts.append(f"<p><strong>Affected video:</strong> {html.escape(report.video)}</p>")
+    parts.extend(["<h2 style=\"font-size:17px;\">What you can do</h2>",
+                  _actions_html(diagnosis),
+                  f"<p><strong>Run impact:</strong> {html.escape(report.impact)}</p>"])
+
+    if report.related:
+        lines.extend(["", "Other problems found during this run:"])
+        parts.append('<h2 style="font-size:17px;">Other problems found during this run</h2>')
+        for problem in report.related:
+            other = problem.diagnosis
+            count = f"{problem.occurrences} failed request(s)"
+            if problem.video_count:
+                count += f" across {problem.video_count} video(s)"
+            lines.extend(["", f"{other.title} — {count}", other.cause,
+                          f"Step: {problem.stage}"])
+            examples = [WATCH_URL.format(video_id=vid) for vid in problem.example_ids]
+            if examples:
+                lines.append("Example videos: " + ", ".join(examples))
+            lines.extend(f"- {action}" for action in other.actions)
+            lines.extend([f"Evidence: {other.evidence}"])
+            parts.extend([
+                f'<h3 style="font-size:15px;">{html.escape(other.title)} — {count}</h3>',
+                f"<p>{html.escape(other.cause)}</p>",
+                f"<p><strong>Step:</strong> {html.escape(problem.stage)}</p>",
+            ])
+            if examples:
+                links = ", ".join(f'<a href="{html.escape(url, quote=True)}">{html.escape(url)}</a>'
+                                  for url in examples)
+                parts.append(f"<p><strong>Example videos:</strong> {links}</p>")
+            parts.extend([_actions_html(other), _evidence_html(other.evidence)])
+
+    lines.extend(["", "Technical evidence:", diagnosis.evidence, "",
+                  "The complete traceback is in logs/digest.log on the Mac running the digest."])
+    parts.extend(['<h2 style="font-size:17px;">Technical evidence</h2>',
+                  _evidence_html(diagnosis.evidence),
+                  "<p>The complete traceback is in <code>logs/digest.log</code> "
+                  "on the Mac running the digest.</p></div>"])
+    return subject, "\n".join(parts), "\n".join(lines)
+
+
+def _actions_html(diagnosis: Diagnosis) -> str:
+    return "<ol>" + "".join(f"<li>{html.escape(action)}</li>" for action in diagnosis.actions) + "</ol>"
+
+
+def _evidence_html(evidence: str) -> str:
+    return ('<pre style="background:#f6f6f6;padding:12px;border-radius:6px;'
+            f'white-space:pre-wrap;word-break:break-word;">{html.escape(evidence)}</pre>')
 
 
 # --- HTML ------------------------------------------------------------------------

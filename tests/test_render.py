@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
-from digest.render import DigestItem, render_email, render_empty_email, subject_line
+from digest.config import Config
+from digest.diagnostics import RunContext, make_failure_report
+from digest.render import DigestItem, render_email, render_empty_email, render_error_email, subject_line
 from digest.summarize import Theme, VideoSummary
 from digest.youtube import VideoRecord
 
@@ -94,3 +97,30 @@ def test_render_empty_email():
     subject, html_body, text_body = render_empty_email(DATE)
     assert "no new videos" in subject
     assert "No new videos" in text_body
+
+
+def test_failure_email_puts_cause_and_action_before_technical_evidence():
+    from digest.summarize import AuthError
+
+    report = make_failure_report(AuthError("OAuth session expired and could not be refreshed"),
+                                 RunContext(stage="Claude summaries", video="Talk (vid1)"),
+                                 Config(root=Path(".")))
+    subject, html_body, text_body = render_error_email(DATE, report)
+    assert "FAILED: Claude login expired" in subject
+    for body in (html_body, text_body):
+        assert body.index("Claude login expired") < body.index("What you can do") < body.index("Technical evidence")
+        assert "/login" in body
+        assert "Talk (vid1)" in body
+        assert "Pending videos remain eligible for retry" in body
+
+
+def test_failure_email_escapes_untrusted_error_and_video_text():
+    report = make_failure_report(RuntimeError('<script>alert("error")</script>'),
+                                 RunContext(stage="Email rendering", video="<img src=x onerror=bad()>"),
+                                 Config(root=Path(".")))
+    _, html_body, text_body = render_error_email(DATE, report)
+    assert "<script>" not in html_body
+    assert "<img " not in html_body
+    assert "&lt;script&gt;" in html_body
+    assert "&lt;img " in html_body
+    assert '<script>alert("error")</script>' in text_body

@@ -35,6 +35,17 @@ class AuthError(SummarizeError):
     """The claude CLI has no usable login — retrying cannot help."""
 
 
+class BatchSummarizeError(SummarizeError):
+    """A failed batch, retaining the per-video errors for the notification."""
+
+    def __init__(self, total: int, failures: list[tuple[VideoRecord, Exception]]):
+        self.failures = failures
+        super().__init__(
+            f"{len(failures)}/{total} summaries failed — aborting the run "
+            "so these videos are retried next time"
+        )
+
+
 @dataclass
 class VideoSummary:
     problem: str
@@ -102,16 +113,17 @@ def claude_env() -> dict[str, str]:
     return env
 
 
-# Substrings marking a login failure that a retry cannot fix. Every variant the
-# CLI emits ends in "Please run /login"; usage-limit messages match none of
-# these and keep their normal retry path.
+# Substrings marking a login failure that a retry cannot fix, including the
+# OAuth session-expiry message observed in scheduled runs. Usage-limit messages
+# keep their normal retry path.
 _AUTH_MARKERS = ("not logged in", "/login", "invalid api key",
-                 "authentication_error", "oauth token has expired")
+                 "authentication_error", "oauth token has expired",
+                 "oauth session expired", "failed to authenticate")
 
 _AUTH_HINT = (
     "claude CLI is not authenticated: {reason}. Run `claude` once interactively "
-    "to log in. If it only fails on the schedule, the scheduler is not passing "
-    "USER through and the CLI cannot find its Keychain login."
+    "and use /login to sign in again. If it only fails on the schedule, "
+    "check the scheduler's user and environment."
 )
 
 
@@ -193,7 +205,7 @@ def _call_with_retry(runner: Runner, prompt: str, attempts: int = 2,
             log.warning("claude call failed (attempt %d/%d): %s", attempt + 1, attempts, exc)
             if attempt + 1 < attempts:
                 time.sleep(backoff_seconds)
-    raise SummarizeError(f"claude call failed after {attempts} attempts: {last}")
+    raise SummarizeError(f"claude call failed after {attempts} attempts: {last}") from last
 
 
 # --- JSON extraction -------------------------------------------------------------

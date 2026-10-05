@@ -18,10 +18,12 @@ from datetime import datetime, timedelta, timezone
 
 from . import youtube
 from .config import Config
+from .diagnostics import RunContext, RunIssue, make_failure_report
 from .emailer import send_email
 from .render import DigestItem, render_email, render_empty_email, render_error_email
 from .state import State
-from .summarize import (AuthError, SummarizeError, Theme, group_into_themes,
+from .summarize import (AuthError, BatchSummarizeError, SummarizeError, Theme,
+                        group_into_themes,
                         make_claude_runner, summarize_video)
 from .youtube import DEFER_LIVE_STATUSES, FeedEntry, VideoRecord, YouTubeError
 
@@ -68,7 +70,10 @@ def feed_is_saturated(feed: list[FeedEntry], fresh: list[FeedEntry]) -> bool:
 # --- discovery -------------------------------------------------------------------
 
 def discover_candidates(cfg: Config, state: State, window_start: datetime,
-                        force_deep: bool = False) -> list[Candidate]:
+                        force_deep: bool = False,
+                        context: RunContext | None = None) -> list[Candidate]:
+    if context:
+        context.at("YouTube channel discovery")
     feed = youtube.fetch_feed(cfg.channel_id)
     log.info("RSS feed: %d entries", len(feed))
     fresh = select_feed_candidates(feed, set(state.seen), window_start)
@@ -80,11 +85,12 @@ def discover_candidates(cfg: Config, state: State, window_start: datetime,
         # Backfill: the window reaches far past the 15-entry feed, and recent
         # videos may already be seen — walk the whole window, skipping seen ids.
         log.info("backfill: walking uploads playlist back to %s", window_start.isoformat())
-        for cand in _deep_discover(cfg, state, window_start, set(candidates), skip_seen=True):
+        for cand in _deep_discover(cfg, state, window_start, set(candidates),
+                                   skip_seen=True, context=context):
             candidates[cand.video_id] = cand
     elif feed_is_saturated(feed, fresh):
         log.info("RSS feed saturated (all %d entries are new) — walking uploads playlist", len(feed))
-        for cand in _deep_discover(cfg, state, window_start, set(candidates)):
+        for cand in _deep_discover(cfg, state, window_start, set(candidates), context=context):
             candidates[cand.video_id] = cand
 
     for vid, deferred in state.deferred.items():
@@ -101,7 +107,8 @@ def discover_candidates(cfg: Config, state: State, window_start: datetime,
 
 
 def _deep_discover(cfg: Config, state: State, window_start: datetime,
-                   already: set[str], skip_seen: bool = False) -> list[Candidate]:
+                   already: set[str], skip_seen: bool = False,
+                   context: RunContext | None = None) -> list[Candidate]:
     """Walk the uploads playlist newest-first until we cross back into known
     territory (a seen video, or one published before the window).
 
@@ -113,6 +120,8 @@ def _deep_discover(cfg: Config, state: State, window_start: datetime,
     page_size = 100
     for page in range(MAX_DEEP_PAGES):
         start = page * page_size + 1
+        if context:
+            context.at("YouTube channel discovery")
         ids = youtube.list_uploads(cfg.uploads_playlist_id, start, start + page_size - 1)
         if not ids:
             return found
@@ -123,6 +132,8 @@ def _deep_discover(cfg: Config, state: State, window_start: datetime,
                 return found
             if vid in already:
                 continue
+            if context:
+                context.at("YouTube video and captions", vid)
             try:
                 record = youtube.fetch_video(vid)
             except YouTubeError as exc:
@@ -130,6 +141,8 @@ def _deep_discover(cfg: Config, state: State, window_start: datetime,
                 # yt-dlp refuses to fetch. Defer by id so it's retried on later
                 # runs — its RSS timestamp may fall outside tomorrow's window.
                 log.warning("deep discovery: could not fetch %s, deferring: %s", vid, exc)
+                if context:
+                    context.issues.append(RunIssue("YouTube video and captions", exc, vid))
                 state.defer(vid, "", f"fetch failed: {exc}"[:200], None, datetime.now(timezone.utc))
                 continue
             if record.published < window_start:
@@ -144,14 +157,19 @@ def _deep_discover(cfg: Config, state: State, window_start: datetime,
 # --- processing -------------------------------------------------------------------
 
 def process_candidates(cfg: Config, state: State, candidates: list[Candidate],
-                       now: datetime, test_mode: bool) -> list[VideoRecord]:
+                       now: datetime, test_mode: bool,
+                       context: RunContext | None = None) -> list[VideoRecord]:
     """Fetch each candidate and decide: process, defer, or skip."""
     ready: list[VideoRecord] = []
     for cand in candidates:
+        if context:
+            context.at("YouTube video and captions", cand.video_id)
         try:
             rec = cand.record or youtube.fetch_video(cand.video_id, cand.published)
         except YouTubeError as exc:
             log.error("could not fetch %s, deferring to next run: %s", cand.video_id, exc)
+            if context:
+                context.issues.append(RunIssue("YouTube video and captions", exc, cand.video_id))
             if not test_mode:
                 state.defer(cand.video_id, "", "fetch failed", cand.published, now)
             continue
@@ -184,13 +202,19 @@ def process_candidates(cfg: Config, state: State, candidates: list[Candidate],
     return ready
 
 
-def build_digest(cfg: Config, records: list[VideoRecord]) -> tuple[list[Theme], dict[str, DigestItem]]:
+def build_digest(cfg: Config, records: list[VideoRecord],
+                 context: RunContext | None = None) -> tuple[list[Theme], dict[str, DigestItem]]:
+    if context:
+        context.at("Claude summaries")
     runner = make_claude_runner(cfg)
     links_map = youtube.filter_boilerplate({r.video_id: r.links for r in records})
 
     items: dict[str, DigestItem] = {}
     summarized: list[tuple[VideoRecord, object]] = []
+    failures: list[tuple[VideoRecord, Exception]] = []
     for i, rec in enumerate(records, 1):
+        if context:
+            context.at("Claude summaries", f"{rec.title} ({rec.video_id})")
         log.info("summarizing %d/%d: %s", i, len(records), rec.title)
         note = ""
         if rec.transcript is None:
@@ -207,22 +231,26 @@ def build_digest(cfg: Config, records: list[VideoRecord]) -> tuple[list[Theme], 
             raise
         except SummarizeError as exc:
             log.error("summarization failed for %s: %s", rec.video_id, exc)
+            failures.append((rec, exc))
+            if context:
+                context.issues.append(RunIssue("Claude summaries", exc, rec.video_id))
             summary = None
         items[rec.video_id] = DigestItem(
             video=rec, summary=summary, links=links_map.get(rec.video_id, []), note=note,
         )
 
-    failed_count = sum(1 for item in items.values() if item.summary is None)
+    if context:
+        context.at("Claude summaries")
+    failed_count = len(failures)
     if failed_count >= 2 and failed_count > len(records) // 2:
         # A mostly-failed batch (usage limits, auth expiry) must not be sent:
         # sending would mark everything seen and the summaries would be lost.
         # Aborting keeps the videos unseen so the next run redoes them.
-        raise SummarizeError(
-            f"{failed_count}/{len(records)} summaries failed — aborting the run "
-            "so these videos are retried next time"
-        )
+        raise BatchSummarizeError(len(records), failures) from failures[0][1]
 
     if summarized:
+        if context:
+            context.at("Claude theme grouping")
         log.info("grouping %d video(s) into themes", len(summarized))
         max_themes = 6 if len(summarized) <= 20 else 12
         themes = group_into_themes(summarized, runner, max_themes)  # type: ignore[arg-type]
@@ -241,14 +269,17 @@ def build_digest(cfg: Config, records: list[VideoRecord]) -> tuple[list[Theme], 
 
 # --- run --------------------------------------------------------------------------
 
-def run(cfg: Config, args: argparse.Namespace) -> None:
+def run(cfg: Config, args: argparse.Namespace, context: RunContext | None = None) -> None:
+    context = context or RunContext()
     now = datetime.now(timezone.utc)
     today = datetime.now().astimezone()
     test_mode = args.test_latest is not None
     persist = not (args.dry_run or args.no_send or test_mode)
+    context.at("Reading saved state")
     state = State.load(cfg.state_file)
 
     if test_mode:
+        context.at("YouTube channel discovery")
         feed = youtube.fetch_feed(cfg.channel_id)
         candidates = [Candidate(e.video_id, e.published) for e in feed[:args.test_latest]]
         log.info("test mode: processing the %d most recent upload(s), state untouched",
@@ -261,26 +292,33 @@ def run(cfg: Config, args: argparse.Namespace) -> None:
         log.info("window start: %s (last success: %s)", window_start.isoformat(),
                  state.last_success.isoformat() if state.last_success else "never")
         candidates = discover_candidates(cfg, state, window_start,
-                                         force_deep=bool(args.backfill_hours))
+                                         force_deep=bool(args.backfill_hours), context=context)
 
-    records = process_candidates(cfg, state, candidates, now, test_mode)
+    records = process_candidates(cfg, state, candidates, now, test_mode, context=context)
 
     if not records:
         log.info("no videos ready for the digest today")
         if cfg.send_empty_digest and not args.dry_run and not args.no_send:
+            context.at("Email rendering")
             subject, html_body, text_body = render_empty_email(today)
+            context.at("Resend email delivery")
             send_email(cfg.resend_api_key, cfg.email_from, cfg.email_to,
                        subject, html_body, text_body)
+            context.digest_sent = True
         if persist:
+            context.at("Saving run state")
             state.last_success = now
             state.prune(now, cfg.seen_retention_days, cfg.deferred_retention_days)
             state.save(cfg.state_file)
+            context.state_saved = True
         return
 
-    themes, items = build_digest(cfg, records)
+    themes, items = build_digest(cfg, records, context=context)
+    context.at("Email rendering")
     subject, html_body, text_body = render_email(themes, items, today)
 
     if args.dry_run:
+        context.at("Writing preview files")
         preview_html = cfg.root / "preview.html"
         preview_txt = cfg.root / "preview.txt"
         preview_html.write_text(html_body)
@@ -293,16 +331,20 @@ def run(cfg: Config, args: argparse.Namespace) -> None:
         log.info("--no-send: skipping email and state update")
         return
 
+    context.at("Resend email delivery")
     send_email(cfg.resend_api_key, cfg.email_from, cfg.email_to,
                subject, html_body, text_body)
+    context.digest_sent = True
     log.info("digest sent: %s (%d videos)", subject, len(items))
 
     if persist:
+        context.at("Saving run state")
         for vid in items:
             state.mark_seen(vid, now)
         state.last_success = now
         state.prune(now, cfg.seen_retention_days, cfg.deferred_retention_days)
         state.save(cfg.state_file)
+        context.state_saved = True
         log.info("state saved (%d seen, %d deferred)", len(state.seen), len(state.deferred))
 
 
@@ -341,15 +383,19 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cfg = Config.load()
     _setup_logging(cfg, args.verbose)
+    context = RunContext()
     try:
-        run(cfg, args)
+        run(cfg, args, context=context)
         return 0
     except Exception as exc:  # noqa: BLE001 — last-resort handler for cron
         log.exception("digest run failed")
+        report = make_failure_report(exc, context, cfg)
+        log.error("%s at %s: %s Next steps: %s", report.diagnosis.title, report.stage,
+                  report.diagnosis.cause, " ".join(report.diagnosis.actions))
         if cfg.error_emails and cfg.resend_api_key and not args.dry_run and not args.no_send:
             try:
                 subject, html_body, text_body = render_error_email(
-                    datetime.now().astimezone(), f"{type(exc).__name__}: {exc}")
+                    datetime.now().astimezone(), report)
                 send_email(cfg.resend_api_key, cfg.email_from, cfg.email_to,
                            subject, html_body, text_body)
             except Exception:
